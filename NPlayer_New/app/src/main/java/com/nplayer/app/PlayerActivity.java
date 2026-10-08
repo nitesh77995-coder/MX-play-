@@ -23,21 +23,28 @@ import android.widget.Toast;
 
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.Tracks;
 import androidx.media3.common.VideoSize;
+import androidx.media3.common.util.UnstableApi;
+import androidx.media3.effect.Presentation;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 import androidx.media3.ui.AspectRatioFrameLayout;
 import androidx.media3.ui.PlayerView;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
+@UnstableApi
 public final class PlayerActivity extends Activity {
+    private static final String ENHANCEMENT_UNSUPPORTED =
+            "Enhancement not supported on this device";
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
     private Uri videoUri;
@@ -45,8 +52,13 @@ public final class PlayerActivity extends Activity {
     private boolean portraitOrientation;
     private int sourceWidth;
     private int sourceHeight;
+    private float sourcePixelWidthHeightRatio = 1f;
+    private int sourceRotationDegrees;
+    private int selectedGpuUpscaleTarget;
+    private int activeGpuUpscaleTarget;
     private TextView elapsedTime;
     private TextView durationTime;
+    private TextView filename;
     private SeekBar timeline;
     private LinearLayout topBar;
     private LinearLayout bottomBar;
@@ -96,17 +108,27 @@ public final class PlayerActivity extends Activity {
         topBar.setGravity(Gravity.CENTER_VERTICAL);
         topBar.setPadding(dp(10), dp(6), dp(10), dp(6));
         topBar.setBackground(overlayBand(true));
-        TextView title = new TextView(this);
-        title.setText(getIntent().getStringExtra("title") == null
+        LinearLayout titleGroup = new LinearLayout(this);
+        titleGroup.setGravity(Gravity.CENTER_VERTICAL);
+        topBar.addView(titleGroup, new LinearLayout.LayoutParams(0, dp(44), 0.45f));
+        TextView back = action("‹");
+        back.setTextSize(28);
+        back.setContentDescription("Back to video library");
+        back.setMinWidth(dp(42));
+        back.setOnClickListener(v -> finish());
+        titleGroup.addView(back, new LinearLayout.LayoutParams(dp(42), dp(42)));
+
+        filename = new TextView(this);
+        filename.setText(getIntent().getStringExtra("title") == null
             ? "N Player" : getIntent().getStringExtra("title"));
-        title.setTextColor(Color.WHITE);
-        title.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
-        title.setTextSize(13);
-        title.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
-        title.setMaxLines(1);
-        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        title.setMinWidth(0);
-        topBar.addView(title, new LinearLayout.LayoutParams(0, dp(42), 1));
+        filename.setTextColor(Color.WHITE);
+        filename.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        filename.setTextSize(13);
+        filename.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+        filename.setMaxLines(1);
+        filename.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        filename.setMinWidth(0);
+        titleGroup.addView(filename, new LinearLayout.LayoutParams(0, dp(42), 1));
 
         LinearLayout toolbarActions = new LinearLayout(this);
         toolbarActions.setGravity(Gravity.CENTER_VERTICAL);
@@ -114,10 +136,7 @@ public final class PlayerActivity extends Activity {
         actionScroll.setHorizontalScrollBarEnabled(false);
         actionScroll.setFillViewport(false);
         actionScroll.addView(toolbarActions, new HorizontalScrollView.LayoutParams(-2, -2));
-        int screenWidthDp = (int) (getResources().getDisplayMetrics().widthPixels
-            / getResources().getDisplayMetrics().density);
-        int actionsWidth = Math.max(0, Math.min(330, screenWidthDp - 145));
-        topBar.addView(actionScroll, new LinearLayout.LayoutParams(dp(actionsWidth), dp(44)));
+        topBar.addView(actionScroll, new LinearLayout.LayoutParams(0, dp(44), 1));
 
         TextView fit = action("FIT");
         fit.setContentDescription("Video fit options");
@@ -131,14 +150,14 @@ public final class PlayerActivity extends Activity {
         tracks.setContentDescription("Select audio or subtitle track");
         tracks.setOnClickListener(v -> showTracks());
         toolbarActions.addView(tracks);
-        TextView upscale = capabilityAction("Upscale", "Show source-appropriate upscale options");
+        TextView upscale = capabilityAction("GPU Upscale", "Choose an ordinary GPU output resolution");
         upscale.setOnClickListener(v -> showUpscaleOptions());
         addCapabilityAction(toolbarActions, upscale);
         TextView fps = capabilityAction("FPS", "Show frame-rate options");
         fps.setOnClickListener(v -> showFpsOptions());
         addCapabilityAction(toolbarActions, fps);
         TextView ai = action("AI");
-        ai.setTextColor(0xFFCDF280);
+        ai.setTextColor(Color.WHITE);
         ai.setContentDescription("AI enhancement unavailable");
         ai.setOnClickListener(v -> showEnhancementStatus());
         toolbarActions.addView(ai);
@@ -148,15 +167,27 @@ public final class PlayerActivity extends Activity {
         centerControls = new LinearLayout(this);
         centerControls.setGravity(Gravity.CENTER);
         centerControls.setOrientation(LinearLayout.HORIZONTAL);
-        centerControls.setPadding(dp(14), dp(8), dp(14), dp(8));
-        centerControls.setBackground(roundedOverlay(0x66303831, 24));
+        centerControls.setPadding(dp(10), dp(8), dp(10), dp(8));
+        centerControls.setBackground(roundedOverlay(0xAA000000, 20));
         addTransportButton(centerControls, "|‹", "Previous video", this::playPrevious);
         addSkipButton(centerControls, "↶", "5", "Rewind 5 seconds", () -> seekBy(-5000));
         addTransportButton(centerControls, "▶", "Play or pause", this::togglePlayback);
         addSkipButton(centerControls, "↷", "15", "Forward 15 seconds", () -> seekBy(15000));
         addTransportButton(centerControls, "›|", "Next video", this::playNext);
-        FrameLayout.LayoutParams centerParams = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER);
+        int initialPanelWidth = Math.max(0, Math.min(dp(600),
+            getResources().getDisplayMetrics().widthPixels - dp(32)));
+        FrameLayout.LayoutParams centerParams = new FrameLayout.LayoutParams(
+            initialPanelWidth, -2, Gravity.CENTER);
         root.addView(centerControls, centerParams);
+        root.addOnLayoutChangeListener((view, left, top, right, bottom,
+                        oldLeft, oldTop, oldRight, oldBottom) -> {
+            int panelWidth = Math.max(0, Math.min(dp(600), right - left - dp(32)));
+            FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) centerControls.getLayoutParams();
+            if (params.width != panelWidth) {
+            params.width = panelWidth;
+            centerControls.setLayoutParams(params);
+            }
+        });
 
         bottomBar = new LinearLayout(this);
         bottomBar.setOrientation(LinearLayout.VERTICAL);
@@ -217,7 +248,24 @@ public final class PlayerActivity extends Activity {
         trackSelector = new DefaultTrackSelector(this);
         player = new ExoPlayer.Builder(this).setTrackSelector(trackSelector).build();
         playerView.setPlayer(player);
-        player.setMediaItem(MediaItem.fromUri(videoUri));
+        ArrayList<String> queueUris = getIntent().getStringArrayListExtra("queue_uris");
+        ArrayList<String> queuedTitles = getIntent().getStringArrayListExtra("queue_titles");
+        int queueIndex = getIntent().getIntExtra("queue_index", 0);
+        if (queueUris == null || queueUris.isEmpty()) {
+            queueUris = new ArrayList<>();
+            queueUris.add(videoUri.toString());
+        }
+        if (queueIndex < 0 || queueIndex >= queueUris.size()) queueIndex = 0;
+        if (queuedTitles == null) queuedTitles = new ArrayList<>();
+        ArrayList<MediaItem> mediaItems = new ArrayList<>();
+        for (int i = 0; i < queueUris.size(); i++) {
+            String itemTitle = i < queuedTitles.size() ? queuedTitles.get(i) : "N Player";
+            MediaMetadata metadata = new MediaMetadata.Builder().setTitle(itemTitle).build();
+            mediaItems.add(new MediaItem.Builder().setUri(Uri.parse(queueUris.get(i)))
+                    .setMediaMetadata(metadata).build());
+        }
+        if (queueIndex < queuedTitles.size()) filename.setText(queuedTitles.get(queueIndex));
+        player.setMediaItems(mediaItems, queueIndex, getIntent().getLongExtra("resume", 0));
         player.addListener(new Player.Listener() {
             @Override public void onIsPlayingChanged(boolean isPlaying) {
                 updatePlayIcon();
@@ -228,11 +276,45 @@ public final class PlayerActivity extends Activity {
             }
 
             @Override public void onVideoSizeChanged(VideoSize videoSize) {
-                sourceWidth = videoSize.width;
-                sourceHeight = videoSize.height;
+                if (activeGpuUpscaleTarget == 0) {
+                    sourceWidth = videoSize.width;
+                    sourceHeight = videoSize.height;
+                    sourcePixelWidthHeightRatio = videoSize.pixelWidthHeightRatio;
+                    sourceRotationDegrees = videoSize.unappliedRotationDegrees;
+                    if (selectedGpuUpscaleTarget > 0) {
+                        if (selectedGpuUpscaleTarget > sourceShortSide()) {
+                            applyGpuUpscaling(selectedGpuUpscaleTarget, false);
+                        } else {
+                            selectedGpuUpscaleTarget = 0;
+                        }
+                    }
+                }
+            }
+
+            @Override public void onMediaItemTransition(MediaItem mediaItem, int reason) {
+                if (activeGpuUpscaleTarget > 0) {
+                    try {
+                        player.setVideoEffects(Collections.emptyList());
+                    } catch (RuntimeException ignored) { }
+                    activeGpuUpscaleTarget = 0;
+                }
+                sourceWidth = 0;
+                sourceHeight = 0;
+                sourcePixelWidthHeightRatio = 1f;
+                sourceRotationDegrees = 0;
+                if (mediaItem.mediaMetadata.title != null) {
+                    filename.setText(mediaItem.mediaMetadata.title);
+                }
             }
 
             @Override public void onPlayerError(PlaybackException error) {
+                if (activeGpuUpscaleTarget > 0
+                        && (error.errorCode == PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSOR_INIT_FAILED
+                        || error.errorCode == PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSING_FAILED)
+                        && recoverFromGpuUpscaleFailure()) {
+                    showGpuUpscaleUnavailable();
+                    return;
+                }
                 new AlertDialog.Builder(PlayerActivity.this)
                         .setTitle("Can't play this video")
                         .setMessage(error.getErrorCodeName() + ": " + error.getMessage())
@@ -240,8 +322,6 @@ public final class PlayerActivity extends Activity {
                         .show();
             }
         });
-        long resume = getIntent().getLongExtra("resume", 0);
-        if (resume > 0) player.seekTo(resume);
         player.prepare();
         player.play();
         updatePlayIcon();
@@ -272,12 +352,11 @@ public final class PlayerActivity extends Activity {
         button.setTextSize(label.length() > 3 ? 15 : 25);
         button.setGravity(Gravity.CENTER);
         button.setContentDescription(description);
-        button.setMinWidth(dp(label.length() > 3 ? 66 : 56));
         button.setMinHeight(dp(58));
-        button.setPadding(dp(5), 0, dp(5), 0);
+        button.setPadding(dp(2), 0, dp(2), 0);
         button.setBackground(selectableBackground());
         button.setFocusable(true);
-        parent.addView(button, new LinearLayout.LayoutParams(-2, dp(58)));
+        parent.addView(button, new LinearLayout.LayoutParams(0, dp(58), 1));
         button.setOnClickListener(v -> {
             action.run();
             showControlsTemporarily();
@@ -292,8 +371,8 @@ public final class PlayerActivity extends Activity {
         button.setGravity(Gravity.CENTER);
         button.setContentDescription(description);
         button.setPadding(dp(5), 0, dp(5), 0);
-        button.setMinimumWidth(dp(62));
         button.setMinimumHeight(dp(58));
+        button.setMinimumWidth(0);
         button.setBackground(selectableBackground());
         button.setFocusable(true);
         TextView glyph = new TextView(this);
@@ -308,7 +387,7 @@ public final class PlayerActivity extends Activity {
         caption.setTextSize(9);
         caption.setGravity(Gravity.CENTER);
         button.addView(caption, new LinearLayout.LayoutParams(-1, dp(13)));
-        parent.addView(button, new LinearLayout.LayoutParams(-2, dp(58)));
+        parent.addView(button, new LinearLayout.LayoutParams(0, dp(58), 1));
         button.setOnClickListener(v -> {
             action.run();
             showControlsTemporarily();
@@ -352,7 +431,8 @@ public final class PlayerActivity extends Activity {
 
     private void playPrevious() {
         if (player != null) {
-            player.seekTo(0);
+            if (player.hasPreviousMediaItem()) player.seekToPreviousMediaItem();
+            else player.seekTo(0);
             player.play();
             updatePlayIcon();
         }
@@ -481,70 +561,153 @@ public final class PlayerActivity extends Activity {
 
     private void showEnhancementStatus() {
         new AlertDialog.Builder(this)
-                .setTitle("AI enhancement unavailable")
-                .setMessage("Playback is using the original video. This build has no verified AI enhancement model or inference-to-renderer pipeline. Upscaling and generated 48, 50, 60, or 120 FPS frames are unavailable. Standard playback remains available.")
+                .setTitle("Enhancement status")
+                .setMessage("GPU upscaling uses standard GPU resampling and does not add AI-generated detail. Motion interpolation remains unsupported; FPS stays Original / Off.")
                 .setPositiveButton("OK", null)
                 .show();
     }
 
     private void showUpscaleOptions() {
-        if (player != null) {
-            VideoSize current = player.getVideoSize();
-            if (current.height > 0) {
-                sourceWidth = current.width;
-                sourceHeight = current.height;
+        refreshSourceVideoSize();
+        ArrayList<Integer> targets = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        targets.add(0);
+        labels.add("Off");
+        if (sourceShortSide() > 0) {
+            int[] outputShortSides = {720, 1080, 2160};
+            for (int outputShortSide : outputShortSides) {
+                if (outputShortSide > sourceShortSide()) {
+                    targets.add(outputShortSide);
+                    labels.add(outputShortSide == 2160
+                            ? "2160p (4K) · GPU" : outputShortSide + "p · GPU");
+                }
             }
         }
-        if (sourceHeight <= 0) {
-            showEnhancementUnavailable("Source dimensions are not available yet. Normal playback is unaffected.");
-            return;
-        }
 
-        ArrayList<String> outputs = new ArrayList<>();
-        if (sourceHeight <= 480) {
-            outputs.add("720p");
-            outputs.add("1080p");
-            outputs.add("4K");
-        } else if (sourceHeight <= 720) {
-            outputs.add("1080p");
-            outputs.add("4K");
-        } else {
-            if (sourceHeight < 1080) outputs.add("1080p");
-            if (sourceHeight < 2160) outputs.add("4K");
-        }
-
-        String source = sourceWidth > 0 ? sourceWidth + " x " + sourceHeight : sourceHeight + "p";
-        if (outputs.isEmpty()) {
-            showEnhancementUnavailable("Source: " + source + ". No higher preset output resolution is available.");
-            return;
-        }
-        String[] labels = new String[outputs.size()];
-        for (int i = 0; i < outputs.size(); i++) labels[i] = outputs.get(i) + "  ·  unavailable";
+        String[] options = labels.toArray(new String[0]);
+        int checkedIndex = targets.indexOf(selectedGpuUpscaleTarget);
+        if (checkedIndex < 0) checkedIndex = 0;
+        String title = sourceShortSide() > 0
+            ? "GPU upscaling · source " + sourceWidth + " × " + sourceHeight
+            : "GPU upscaling";
         new AlertDialog.Builder(this)
-                .setTitle("Upscale · source " + source)
-                .setMessage("These resolutions are listed for reference only. AI upscaling is not integrated; playback remains at the original resolution.")
-                .setItems(labels, (dialog, which) -> showEnhancementUnavailable(
-                        "AI upscaling is not supported in this build. Original playback continues."))
+            .setTitle(title)
+                .setSingleChoiceItems(options, checkedIndex, (dialog, which) -> {
+                    int target = targets.get(which);
+                    applyGpuUpscaling(target, true);
+                    dialog.dismiss();
+                })
+            .setNeutralButton("About", (dialog, which) -> new AlertDialog.Builder(this)
+                .setTitle("GPU upscaling")
+                .setMessage(sourceShortSide() > 0
+                    ? "Ordinary GPU resampling only; no AI detail reconstruction. 2160p output may use substantial GPU memory."
+                    : "Source dimensions are not available yet. GPU upscaling is off.")
+                .setPositiveButton("OK", null)
+                .show())
                 .setNegativeButton("Close", null)
                 .show();
     }
+
+        private void refreshSourceVideoSize() {
+        if (player == null) return;
+        VideoSize current = player.getVideoSize();
+        if (current.width > 0 && current.height > 0) {
+            sourceWidth = current.width;
+            sourceHeight = current.height;
+            sourcePixelWidthHeightRatio = current.pixelWidthHeightRatio;
+            sourceRotationDegrees = current.unappliedRotationDegrees;
+        }
+        }
 
     private void showFpsOptions() {
-        String[] targets = {"48 FPS  ·  unavailable", "50 FPS  ·  unavailable",
-                "60 FPS  ·  unavailable", "120 FPS  ·  unavailable"};
         new AlertDialog.Builder(this)
-                .setTitle("FPS targets")
-                .setMessage("Genuine frame interpolation is not integrated. Source frame rate and playback are unchanged.")
-                .setItems(targets, (dialog, which) -> showEnhancementUnavailable(
-                        "Frame interpolation is not supported in this build. Original playback continues."))
-                .setNegativeButton("Close", null)
+                .setTitle("FPS")
+                .setMessage(ENHANCEMENT_UNSUPPORTED)
+                .setPositiveButton("Original / Off", null)
                 .show();
     }
 
-    private void showEnhancementUnavailable(String message) {
+    private int sourceShortSide() {
+        if (sourceWidth <= 0 || sourceHeight <= 0) return 0;
+        double displayWidth = sourceWidth * (double) sourcePixelWidthHeightRatio;
+        double displayHeight = sourceHeight;
+        int rotation = ((sourceRotationDegrees % 360) + 360) % 360;
+        if (rotation == 90 || rotation == 270) {
+            double previousWidth = displayWidth;
+            displayWidth = displayHeight;
+            displayHeight = previousWidth;
+        }
+        return (int) Math.round(Math.min(displayWidth, displayHeight));
+    }
+
+    private void applyGpuUpscaling(int targetShortSide, boolean reportFailure) {
+        if (player == null) return;
+        try {
+            if (targetShortSide == 0) {
+                player.setVideoEffects(Collections.emptyList());
+                selectedGpuUpscaleTarget = 0;
+                activeGpuUpscaleTarget = 0;
+                return;
+            }
+            if (sourceShortSide() <= 0 || targetShortSide <= sourceShortSide()) return;
+
+            double displayWidth = sourceWidth * (double) sourcePixelWidthHeightRatio;
+            double displayHeight = sourceHeight;
+            int rotation = ((sourceRotationDegrees % 360) + 360) % 360;
+            if (rotation == 90 || rotation == 270) {
+                double previousWidth = displayWidth;
+                displayWidth = displayHeight;
+                displayHeight = previousWidth;
+            }
+            double aspectRatio = displayWidth / displayHeight;
+            int outputWidth = aspectRatio >= 1
+                    ? evenDimension((int) Math.round(targetShortSide * aspectRatio))
+                    : targetShortSide;
+            int outputHeight = aspectRatio >= 1
+                    ? targetShortSide
+                    : evenDimension((int) Math.round(targetShortSide / aspectRatio));
+            Presentation presentation = Presentation.createForWidthAndHeight(
+                    outputWidth, outputHeight, Presentation.LAYOUT_SCALE_TO_FIT);
+            player.setVideoEffects(Collections.singletonList(presentation));
+            selectedGpuUpscaleTarget = targetShortSide;
+            activeGpuUpscaleTarget = targetShortSide;
+        } catch (RuntimeException error) {
+            selectedGpuUpscaleTarget = 0;
+            activeGpuUpscaleTarget = 0;
+            try {
+                player.setVideoEffects(Collections.emptyList());
+            } catch (RuntimeException ignored) { }
+            if (reportFailure) showGpuUpscaleUnavailable();
+        }
+    }
+
+    private int evenDimension(int dimension) {
+        return Math.max(2, (dimension + 1) & ~1);
+    }
+
+    private boolean recoverFromGpuUpscaleFailure() {
+        if (player == null) return false;
+        int mediaItemIndex = player.getCurrentMediaItemIndex();
+        long positionMs = player.getCurrentPosition();
+        try {
+            player.setVideoEffects(Collections.emptyList());
+            activeGpuUpscaleTarget = 0;
+            selectedGpuUpscaleTarget = 0;
+            player.prepare();
+            player.seekTo(mediaItemIndex, positionMs);
+            player.play();
+            return true;
+        } catch (RuntimeException error) {
+            activeGpuUpscaleTarget = 0;
+            selectedGpuUpscaleTarget = 0;
+            return false;
+        }
+    }
+
+    private void showGpuUpscaleUnavailable() {
         new AlertDialog.Builder(this)
-                .setTitle("Enhancement unavailable")
-                .setMessage(message)
+                .setTitle("GPU upscaling unavailable")
+                .setMessage("GPU upscaling could not be initialized. Normal playback is continuing without the effect.")
                 .setPositiveButton("OK", null)
                 .show();
     }
@@ -567,7 +730,7 @@ public final class PlayerActivity extends Activity {
         view.setMinHeight(dp(34));
         view.setContentDescription(description);
         GradientDrawable background = new GradientDrawable();
-        background.setColor(0x55303831);
+        background.setColor(0x88000000);
         background.setCornerRadius(dp(8));
         background.setStroke(dp(1), 0x889AA7B5);
         view.setBackground(background);
@@ -610,8 +773,9 @@ public final class PlayerActivity extends Activity {
         view.setMinWidth(dp(34));
         view.setMinHeight(dp(36));
         GradientDrawable background = new GradientDrawable();
-        background.setColor(0x77303831);
+        background.setColor(0x99000000);
         background.setCornerRadius(dp(10));
+        background.setStroke(dp(1), 0x44FFFFFF);
         view.setBackground(background);
         view.setFocusable(true);
         return view;
@@ -628,7 +792,10 @@ public final class PlayerActivity extends Activity {
         controllerHandler.removeCallbacks(updateTimeline);
         if (player != null && videoUri != null) {
             long position = player.getPlaybackState() == Player.STATE_ENDED ? 0 : player.getCurrentPosition();
-            getPreferences(MODE_PRIVATE).edit().putLong(MainActivity.resumeKey(videoUri), position).apply();
+            Uri currentUri = player.getCurrentMediaItem() == null
+                    || player.getCurrentMediaItem().localConfiguration == null
+                    ? videoUri : player.getCurrentMediaItem().localConfiguration.uri;
+            getPreferences(MODE_PRIVATE).edit().putLong(MainActivity.resumeKey(currentUri), position).apply();
             player.pause();
         }
     }

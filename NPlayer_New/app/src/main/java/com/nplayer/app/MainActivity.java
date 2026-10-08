@@ -565,8 +565,12 @@ public final class MainActivity extends Activity {
     }
 
     private void addVideoItems(ArrayList<MediaEntry> entries) {
+        addVideoItems(entries, null);
+    }
+
+    private void addVideoItems(ArrayList<MediaEntry> entries, ArrayList<MediaEntry> playbackQueue) {
         if (!gridMode) {
-            for (MediaEntry entry : entries) addMediaRow(entry);
+            for (MediaEntry entry : entries) addMediaRow(entry, playbackQueue);
             return;
         }
         for (int i = 0; i < entries.size(); i += 2) {
@@ -575,8 +579,8 @@ public final class MainActivity extends Activity {
             LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
             rowParams.setMargins(0, 0, 0, dp(10));
             list.addView(row, rowParams);
-            addMediaGridTile(row, entries.get(i));
-            if (i + 1 < entries.size()) addMediaGridTile(row, entries.get(i + 1));
+            addMediaGridTile(row, entries.get(i), playbackQueue);
+            if (i + 1 < entries.size()) addMediaGridTile(row, entries.get(i + 1), playbackQueue);
             else row.addView(new View(this), new LinearLayout.LayoutParams(0, dp(1), 1));
         }
     }
@@ -621,7 +625,7 @@ public final class MainActivity extends Activity {
         list.addView(empty, new LinearLayout.LayoutParams(-1, -2));
     }
 
-    private void addMediaRow(MediaEntry entry) {
+    private void addMediaRow(MediaEntry entry, ArrayList<MediaEntry> playbackQueue) {
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(9), dp(9), dp(5), dp(9));
@@ -674,17 +678,17 @@ public final class MainActivity extends Activity {
         overflow.setGravity(Gravity.CENTER);
         overflow.setContentDescription("More options for " + entry.title);
         row.addView(overflow, new LinearLayout.LayoutParams(dp(36), -1));
-        overflow.setOnClickListener(v -> showVideoMenu(entry, overflow));
-        row.setOnClickListener(v -> play(entry));
+        overflow.setOnClickListener(v -> showVideoMenu(entry, overflow, playbackQueue));
+        row.setOnClickListener(v -> play(entry, playbackQueue));
     }
 
-    private void showVideoMenu(MediaEntry entry, View anchor) {
+    private void showVideoMenu(MediaEntry entry, View anchor, ArrayList<MediaEntry> playbackQueue) {
         PopupMenu menu = new PopupMenu(this, anchor);
         menu.getMenu().add("Play");
         menu.getMenu().add("Video details");
         menu.setOnMenuItemClickListener(item -> {
             if ("Play".contentEquals(item.getTitle())) {
-                play(entry);
+                play(entry, playbackQueue);
             } else {
                 String resolution = entry.width > 0 && entry.height > 0
                         ? entry.resolutionLabel() : "Unavailable";
@@ -803,7 +807,8 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void addMediaGridTile(LinearLayout parent, MediaEntry entry) {
+    private void addMediaGridTile(LinearLayout parent, MediaEntry entry,
+                                  ArrayList<MediaEntry> playbackQueue) {
         LinearLayout tile = new LinearLayout(this);
         tile.setOrientation(LinearLayout.VERTICAL);
         tile.setPadding(dp(8), dp(8), dp(8), dp(10));
@@ -851,7 +856,7 @@ public final class MainActivity extends Activity {
         info.setPadding(dp(2), dp(4), dp(2), 0);
         tile.addView(info);
         tile.setContentDescription(entry.title + ", " + resolution);
-        tile.setOnClickListener(v -> play(entry));
+        tile.setOnClickListener(v -> play(entry, playbackQueue));
     }
 
     private void openFolderPicker() {
@@ -918,7 +923,7 @@ public final class MainActivity extends Activity {
                     if (name.toLowerCase(Locale.ROOT).contains(query)) folderVideos.add(entry);
             }
         }
-            addVideoItems(folderVideos);
+            addVideoItems(folderVideos, folderVideos);
     }
 
     private void addFolderRow(MediaEntry folder, Runnable open) {
@@ -953,7 +958,32 @@ public final class MainActivity extends Activity {
     }
 
     private void play(MediaEntry entry) {
+        play(entry, null);
+    }
+
+    private void play(MediaEntry entry, ArrayList<MediaEntry> playbackQueue) {
         knownEntries.put(entry.uri.toString(), entry);
+        ArrayList<MediaEntry> queue = new ArrayList<>();
+        if (playbackQueue != null) {
+            queue.addAll(playbackQueue);
+        } else {
+            String folderPath = entry.relativePath == null ? "" : entry.relativePath;
+            for (MediaEntry candidate : videos) {
+                String candidatePath = candidate.relativePath == null ? "" : candidate.relativePath;
+                if (folderPath.equals(candidatePath)) queue.add(candidate);
+            }
+        }
+        if (queue.isEmpty()) queue.add(entry);
+        sortEntries(queue);
+        ArrayList<String> queueUris = new ArrayList<>();
+        ArrayList<String> queueTitles = new ArrayList<>();
+        int queueIndex = 0;
+        for (int i = 0; i < queue.size(); i++) {
+            MediaEntry queuedEntry = queue.get(i);
+            queueUris.add(queuedEntry.uri.toString());
+            queueTitles.add(queuedEntry.title);
+            if (queuedEntry.uri.equals(entry.uri)) queueIndex = i;
+        }
         JSONArray old = recentUris();
         JSONArray updated = new JSONArray();
         updated.put(entry.uri.toString());
@@ -976,6 +1006,9 @@ public final class MainActivity extends Activity {
         intent.setData(entry.uri);
         intent.putExtra("title", entry.title);
         intent.putExtra("resume", getPreferences(MODE_PRIVATE).getLong(resumeKey(entry.uri), 0));
+        intent.putStringArrayListExtra("queue_uris", queueUris);
+        intent.putStringArrayListExtra("queue_titles", queueTitles);
+        intent.putExtra("queue_index", queueIndex);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         startActivity(intent);
     }
